@@ -1,8 +1,63 @@
-import yfinance as yf, numpy as np, warnings, os, json
+import yfinance as yf, numpy as np, warnings, os, json, re
 from flask import Flask, request, jsonify, render_template
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
+
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+AI_ENABLED = bool(GEMINI_API_KEY)
+
+def ask_ai(stock_data):
+    if not AI_ENABLED:
+        return None
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-2.0-flash-lite')
+        
+        prompt = f"""You are a professional Indian stock market analyst. Analyze this stock and give a clear BUY/HOLD/AVOID verdict.
+
+Stock Data:
+- Name: {stock_data['name']}
+- Symbol: {stock_data['symbol']}
+- Sector: {stock_data['sector']} | Industry: {stock_data['industry']}
+- Current Price: ₹{stock_data['price']}
+- P/E: {stock_data['pe']} | Forward P/E: {stock_data['fwd_pe']}
+- ROE: {stock_data['roe_pct']}% | Profit Margin: {stock_data['pm_pct']}%
+- Revenue Growth: {stock_data['rev_g_pct']}%
+- Debt/Equity: {stock_data['de']}
+- Dividend Yield: {stock_data['dy_pct']}%
+- EPS: ₹{stock_data['eps']}
+- Market Cap: ₹{stock_data['mcap_cr']}Cr
+- Operating Margin: {stock_data['op_margin_pct']}%
+- P/B: {stock_data['pb']}
+
+Technical Indicators:
+- RSI (14): {stock_data['rsi']}
+- 1 Week Change: {stock_data['mom_1w']}%
+- 1 Month Change: {stock_data['mom_1m']}%
+- Price vs MA20: {stock_data['pct_ma20']}%
+- Price vs MA50: {stock_data['pct_ma50']}%
+- Volatility: {stock_data['volatility']}%
+- 52W High: ₹{stock_data['high52']} | 52W Low: ₹{stock_data['low52']}
+
+Respond in THIS EXACT JSON format (no markdown, no code blocks):
+{{
+  "verdict": "buy" or "hold" or "avoid",
+  "verdict_title": "short title",
+  "verdict_text": "2-3 line explanation in Hinglish",
+  "reasons_pos": ["reason 1 in Hinglish", "reason 2 in Hinglish", ...],
+  "reasons_neg": ["reason 1 in Hinglish", "reason 2 in Hinglish", ...],
+  "ai_insight": "1-2 line unique insight about this stock in Hinglish"
+}}"""
+
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text)
+        return json.loads(text)
+    except:
+        return None
 
 # Name-to-ticker mapping for common stocks
 NAME_MAP = {
@@ -180,12 +235,11 @@ def analyze_stock(symbol):
     vl = hist['Volume'].dropna().values
     vol_ratio = (np.mean(vl[-5:])/np.mean(vl[-20:])) if len(vl)>=20 else 1
     
-    # SCORING
+    # SCORING (rule-based fallback — used when AI is not available)
     score = 0
     reasons_pos = []
     reasons_neg = []
     
-    # Valuation
     if pe <= 0:
         score -= 15; reasons_neg.append(f"P/E 0 — company profit नहीं कमा रही, loss में है")
     elif pe < 15: score += 25; reasons_pos.append(f"P/E {pe:.1f}x — बहुत सस्ता है")
@@ -195,47 +249,38 @@ def analyze_stock(symbol):
     
     if fwd_pe and fwd_pe < pe: score += 5; reasons_pos.append(f"Forward P/E {fwd_pe:.1f}x — earnings growth expected")
     
-    # Profitability
     if roe > 0.20: score += 20; reasons_pos.append(f"ROE {roe*100:.1f}% — कंपनी पैसा बनाने में माहिर है")
     elif roe > 0.12: score += 10; reasons_pos.append(f"ROE {roe*100:.1f}% — decent profitability")
-    elif roe > 0: score += 0
-    else: score -= 15; reasons_neg.append(f"ROE {roe*100:.1f}% — company loss में है")
+    elif roe <= 0: score -= 15; reasons_neg.append(f"ROE {roe*100:.1f}% — company loss में है")
     
     if pm > 0.20: score += 15; reasons_pos.append(f"Profit Margin {pm*100:.1f}% — बहुत अच्छा मार्जिन")
     elif pm > 0.10: score += 8; reasons_pos.append(f"Margin {pm*100:.1f}% — OK है")
-    elif pm > 0: score += 0
-    else: score -= 10; reasons_neg.append(f"Negative margin — company profit नहीं कमा रही")
+    elif pm <= 0: score -= 10; reasons_neg.append(f"Negative margin — company profit नहीं कमा रही")
     
-    # Growth
     if rev_g > 0.20: score += 15; reasons_pos.append(f"Revenue Growth {rev_g*100:.1f}% — तेजी से बढ़ रही है")
     elif rev_g > 0.10: score += 8
     elif rev_g > 0: score += 3
     
-    # Debt
     if de == 0: score += 10; reasons_pos.append("Debt/Eq: 0 — कर्ज नहीं है, बहुत safe")
     elif de < 1: score += 5; reasons_pos.append(f"Debt/Eq {de:.1f} — low debt")
-    elif de < 3: score += 0
-    else: score -= 10; reasons_neg.append(f"Debt/Eq {de:.1f} — बहुत ज्यादा कर्ज, risk")
+    elif de > 3: score -= 10; reasons_neg.append(f"Debt/Eq {de:.1f} — बहुत ज्यादा कर्ज, risk")
     
-    # Dividend
     if dy > 0.03: score += 5; reasons_pos.append(f"Dividend {dy*100:.2f}% — अच्छा dividend देती है")
     elif dy > 0.01: score += 2
     
-    # Technical
     if rsi < 30: score += 15; reasons_pos.append(f"RSI {rsi:.0f} — oversold है, bounce aane ka chance")
     elif rsi < 45: score += 5; reasons_pos.append(f"RSI {rsi:.0f} — cheap zone mein hai")
     elif rsi < 60: score += 3
     elif rsi > 75: score -= 10; reasons_neg.append(f"RSI {rsi:.0f} — overbought, gir sakta hai")
     
     if pct_ma20 > 0: score += 5; reasons_pos.append(f"Price MA20 से {abs(pct_ma20):.1f}% ऊपर — uptrend में है")
-    else: score -= 5 if pct_ma20 < -5 else 0; reasons_neg.append(f"Price MA20 से {abs(pct_ma20):.1f}% नीचे — weakness")
+    elif pct_ma20 < -5: score -= 5; reasons_neg.append(f"Price MA20 से {abs(pct_ma20):.1f}% नीचे — weakness")
     
     if mom_1w > 2: score += 5; reasons_pos.append(f"Pichle hafte {mom_1w:+.1f}% up — momentum positive")
     elif mom_1w < -5: score -= 5
     
     if vol_ratio > 1.3: score += 3; reasons_pos.append(f"Volume {vol_ratio:.1f}x — buying interest badha hai")
-    
-    # VERDICT
+
     if score >= 50:
         verdict_type = "buy"
         verdict_title = "✅ BUY — खरीद सकते हैं"
@@ -248,6 +293,33 @@ def analyze_stock(symbol):
         verdict_type = "avoid"
         verdict_title = "🔴 AVOID — अभी न लें"
         verdict_text = f"Score {score}/100. इस शेयर में अभी कमजोरी है। खरीदने से बचें। जब fundamentals improve हों तब सोचें।"
+    
+    # Try AI analysis
+    ai_result = ask_ai({
+        'name': name, 'symbol': symbol, 'price': price,
+        'sector': sector, 'industry': industry,
+        'pe': f'{pe:.1f}' if pe else 'Loss', 'fwd_pe': f'{fwd_pe:.1f}' if fwd_pe else 'N/A',
+        'roe_pct': f'{roe*100:.1f}', 'pm_pct': f'{pm*100:.1f}',
+        'rev_g_pct': f'{rev_g*100:.1f}' if rev_g else '0',
+        'de': f'{de:.1f}' if de else '0 (Debt free)',
+        'dy_pct': f'{dy*100:.2f}', 'eps': f'{eps:.2f}' if eps else '0',
+        'mcap_cr': f'{mcap/1e7:.0f}', 'op_margin_pct': f'{op_margin*100:.1f}',
+        'pb': f'{pb:.1f}', 'rsi': f'{rsi:.0f}',
+        'mom_1w': f'{mom_1w:.1f}', 'mom_1m': f'{mom_1m:.1f}',
+        'pct_ma20': f'{pct_ma20:.1f}', 'pct_ma50': f'{pct_ma50:.1f}',
+        'volatility': f'{volatility:.0f}',
+        'high52': info.get('fiftyTwoWeekHigh', 0),
+        'low52': info.get('fiftyTwoWeekLow', 0),
+    })
+    
+    ai_insight = ''
+    if ai_result:
+        verdict_type = ai_result.get('verdict', verdict_type)
+        verdict_title = ai_result.get('verdict_title', verdict_title)
+        verdict_text = ai_result.get('verdict_text', verdict_text)
+        reasons_pos = ai_result.get('reasons_pos', reasons_pos)
+        reasons_neg = ai_result.get('reasons_neg', reasons_neg)
+        ai_insight = ai_result.get('ai_insight', '')
     
     # Fetch news
     news_list = []
@@ -262,13 +334,14 @@ def analyze_stock(symbol):
     except:
         pass
     
-    # If no news from yfinance, try web search via simple fetch
     if not news_list:
         news_list.append({'title': f'{name} — check moneycontrol.com or economictimes for latest news', 'link': '', 'source': ''})
 
     return {
         'name': name, 'symbol': symbol, 'price': price,
         'sector': sector, 'industry': industry,
+        'ai_enabled': AI_ENABLED,
+        'ai_insight': ai_insight,
         'changePercent': info.get('regularMarketChangePercent', 0) or 0,
         'verdict': {'type': verdict_type, 'title': verdict_title, 'text': verdict_text},
         'metrics': [

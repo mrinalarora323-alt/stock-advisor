@@ -98,6 +98,13 @@ h1{font-size:32px;color:#fff;text-align:center;margin-bottom:8px}
       </div>
     </div>
 
+    <div id="aiBadge" style="display:none;margin-bottom:16px">
+      <div style="background:linear-gradient(135deg,#6366f1,rgba(99,102,241,.3));border:1px solid #818cf8;border-radius:8px;padding:14px 18px;font-size:14px">
+        <span style="color:#a5b4fc;font-weight:600">🤖 AI Powered</span>
+        <span style="color:#ccc" id="aiInsight"></span>
+      </div>
+    </div>
+
     <div class="verdict-box" id="verdictBox">
       <h3 id="verdictTitle">-</h3>
       <p id="verdictText">-</p>
@@ -167,6 +174,15 @@ function showResult(d){
   vb.className='verdict-box verdict-'+d.verdict.type
   document.getElementById('verdictTitle').textContent=d.verdict.title
   document.getElementById('verdictText').textContent=d.verdict.text
+
+  // AI badge
+  const aiBadge=document.getElementById('aiBadge')
+  if(d.ai_enabled){
+    aiBadge.style.display='block'
+    document.getElementById('aiInsight').textContent=d.ai_insight?' — '+d.ai_insight:' — Real AI analysis active'
+  }else{
+    aiBadge.style.display='none'
+  }
 
   const m=document.getElementById('metrics')
   m.innerHTML=''
