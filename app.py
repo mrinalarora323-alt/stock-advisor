@@ -243,17 +243,7 @@ def resolve_symbol(query):
         if tu in NAME_MAP:
             return NAME_MAP[tu]
     
-    # Try yfinance
-    for trial in candidates or [q]:
-        try:
-            t = yf.Ticker(trial.upper()+'.NS')
-            info = t.info
-            if info and (info.get('currentPrice') or info.get('regularMarketPrice')):
-                return trial.upper()
-        except:
-            pass
-
-    # Try Alpha Vantage for resolution
+    # Try Alpha Vantage first (works on Render where Yahoo is blocked)
     if AV_ENABLED:
         for trial in candidates or [q]:
             tu = trial.upper()
@@ -264,6 +254,16 @@ def resolve_symbol(query):
                         return tu
                 except:
                     pass
+
+    # Try yfinance
+    for trial in candidates or [q]:
+        try:
+            t = yf.Ticker(trial.upper()+'.NS')
+            info = t.info
+            if info and (info.get('currentPrice') or info.get('regularMarketPrice')):
+                return trial.upper()
+        except:
+            pass
 
     # Fuzzy match via Alpha Vantage
     if AV_ENABLED:
@@ -684,17 +684,17 @@ def analyze():
     if data:
         return jsonify(data)
     
+    if AV_ENABLED:
+        try:
+            result = analyze_stock_av(symbol)
+            set_cache(symbol, result)
+            return jsonify(result)
+        except:
+            pass
     try:
         result = analyze_stock(symbol)
         set_cache(symbol, result)
         return jsonify(result)
-    except:
-        pass
-    try:
-        if AV_ENABLED:
-            result = analyze_stock_av(symbol)
-            set_cache(symbol, result)
-            return jsonify(result)
     except:
         pass
     stale = get_cached(symbol, allow_stale=True)
