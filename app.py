@@ -1,7 +1,11 @@
-import yfinance as yf, numpy as np, warnings, os, json, re, time as time_module
+import yfinance as yf, numpy as np, warnings, os, json, re, time as time_module, ssl
 from flask import Flask, request, jsonify, render_template
 from urllib.request import Request, urlopen
 warnings.filterwarnings('ignore')
+
+_ssl_ctx = ssl.create_default_context()
+_ssl_ctx.check_hostname = False
+_ssl_ctx.verify_mode = ssl.CERT_NONE
 
 app = Flask(__name__)
 
@@ -68,8 +72,9 @@ def call_llm_api(url, model, api_key, body_template):
     }).encode()
     req = Request(url, data=body,
                   headers={"Authorization": f"Bearer {api_key}",
-                           "Content-Type": "application/json"})
-    resp = json.loads(urlopen(req, timeout=30).read())
+                           "Content-Type": "application/json",
+                           "User-Agent": "Stock-Advisor/1.0"})
+    resp = json.loads(urlopen(req, context=_ssl_ctx, timeout=30).read())
     text = resp["choices"][0]["message"]["content"].strip()
     text = re.sub(r'^```(?:json)?\s*', '', text)
     text = re.sub(r'\s*```$', '', text)
