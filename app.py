@@ -1,4 +1,4 @@
-import yfinance as yf, numpy as np, warnings, os, json, re, time as time_module
+import yfinance as yf, numpy as np, warnings, os, json, re, time as time_module, requests
 from flask import Flask, request, jsonify, render_template
 warnings.filterwarnings('ignore')
 
@@ -20,11 +20,39 @@ def get_cached(key, allow_stale=False):
 def set_cache(key, data):
     _cache[key] = {'data': data, 'time': time_module.time()}
 
-
-
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 OPENROUTER_KEY = os.environ.get('OPENROUTER_API_KEY', '')
 AI_ENABLED = bool(GROQ_API_KEY or OPENROUTER_KEY)
+
+AV_KEY = os.environ.get('ALPHA_VANTAGE_KEY', '')
+AV_ENABLED = bool(AV_KEY)
+
+_av_last_call = 0
+
+def av_get(params):
+    global _av_last_call
+    if not AV_ENABLED:
+        return None
+    now = time_module.time()
+    since_last = now - _av_last_call
+    if since_last < 1.5:
+        time_module.sleep(1.5 - since_last)
+    params['apikey'] = AV_KEY
+    r = requests.get('https://www.alphavantage.co/query', params=params, timeout=20)
+    _av_last_call = time_module.time()
+    data = r.json()
+    if 'Note' in data:
+        return None
+    return data
+
+def _av_num(d, key):
+    v = d.get(key, None)
+    if v is None or v == 'None':
+        return 0
+    try:
+        return float(v)
+    except:
+        return 0
 
 AI_PROMPT = """You are a professional Indian stock market analyst. Analyze this stock and give a clear BUY/HOLD/AVOID verdict.
 
@@ -224,23 +252,233 @@ def resolve_symbol(query):
                 return trial.upper()
         except:
             pass
-    
-    # Fuzzy match
-    for trial in candidates or [q]:
-        ql = trial.lower()
-        if len(ql) < 3:
-            continue
-        for sym in sorted(set(NAME_MAP.values())):
-            try:
-                t = yf.Ticker(sym+'.NS')
-                info = t.info
-                n = (info or {}).get('longName', '') or ''
-                if n.lower() and ql in n.lower():
-                    return sym
-            except:
-                pass
+
+    # Try Alpha Vantage for resolution
+    if AV_ENABLED:
+        for trial in candidates or [q]:
+            tu = trial.upper()
+            for av_sym in (f'{tu}.NS', f'{tu}.BSE'):
+                try:
+                    q = av_get({'function': 'GLOBAL_QUOTE', 'symbol': av_sym})
+                    if q and q.get('Global Quote', {}).get('05. price'):
+                        return tu
+                except:
+                    pass
+
+    # Fuzzy match via Alpha Vantage
+    if AV_ENABLED:
+        for trial in candidates or [q]:
+            ql = trial.lower()
+            if len(ql) < 3:
+                continue
+            for sym in sorted(set(NAME_MAP.values())):
+                try:
+                    o = av_get({'function': 'OVERVIEW', 'symbol': f'{sym}.NS'})
+                    if o and o.get('Name', '').lower() and ql in o.get('Name', '').lower():
+                        return sym
+                except:
+                    try:
+                        o = av_get({'function': 'OVERVIEW', 'symbol': f'{sym}.BSE'})
+                        if o and o.get('Name', '').lower() and ql in o.get('Name', '').lower():
+                            return sym
+                    except:
+                        pass
     
     return None
+
+def analyze_stock_av(symbol):
+    av_sym = f'{symbol}.NS'
+    q = av_get({'function': 'GLOBAL_QUOTE', 'symbol': av_sym})
+    gq = (q or {}).get('Global Quote', {})
+    if not gq or '05. price' not in gq:
+        av_sym = f'{symbol}.BSE'
+        q = av_get({'function': 'GLOBAL_QUOTE', 'symbol': av_sym})
+        gq = (q or {}).get('Global Quote', {})
+    if not gq or '05. price' not in gq:
+        raise Exception("Alpha Vantage: symbol not found")
+
+    o = av_get({'function': 'OVERVIEW', 'symbol': av_sym}) or {}
+    ds = av_get({'function': 'TIME_SERIES_DAILY', 'symbol': av_sym, 'outputsize': 'compact'}) or {}
+    ts = ds.get('Time Series (Daily)', {})
+    dates = sorted(ts.keys(), reverse=True)
+
+    price = _av_num(gq, '05. price')
+    change_pct = float(gq.get('10. change percent', '0').replace('%', ''))
+    name = o.get('Name', symbol)
+    sector = (o.get('Sector') or '')[:25]
+    industry = (o.get('Industry') or '')[:30]
+    pe = _av_num(o, 'PERatio')
+    fwd_pe = _av_num(o, 'ForwardPE')
+    pb = _av_num(o, 'PriceToBookRatio')
+    eps = _av_num(o, 'EPS')
+    mcap = _av_num(o, 'MarketCapitalization')
+    dy = _av_num(o, 'DividendYield')
+    de = _av_num(o, 'DebtToEquityRatio')
+    pm = _av_num(o, 'ProfitMargin')
+    op_margin = _av_num(o, 'OperatingMarginTTM')
+    roe = _av_num(o, 'ReturnOnEquityTTM')
+    rev_g = _av_num(o, 'RevenueGrowth')
+    high52 = _av_num(o, '52WeekHigh')
+    low52 = _av_num(o, '52WeekLow')
+
+    closes = np.array([float(ts[d]['4. close']) for d in dates if '4. close' in ts[d]], dtype=float) if dates else np.array([])
+    closes = closes[::-1]
+    c = closes[~np.isnan(closes) & (closes > 0)]
+
+    mom_1w = ((c[-1]/c[-6])-1)*100 if len(c)>=6 else 0
+    mom_1m = ((c[-1]/c[-21])-1)*100 if len(c)>=21 else 0
+    vol_ratio = 1
+    ma20 = np.mean(c[-20:]) if len(c)>=20 else price
+    ma50 = np.mean(c[-50:]) if len(c)>=50 else price
+    pct_ma20 = ((price-ma20)/ma20)*100
+    pct_ma50 = ((price-ma50)/ma50)*100
+
+    if len(c) >= 2:
+        rets = np.diff(c) / c[:-1]
+        volatility = np.std(rets) * (252**0.5) * 100
+    else:
+        volatility = 0
+
+    deltas = np.diff(c)
+    gain = np.where(deltas>0, deltas, 0)
+    loss = np.where(deltas<0, -deltas, 0)
+    avg_gain = np.mean(gain[-14:]) if len(gain)>=14 else 0
+    avg_loss = np.mean(loss[-14:]) if len(loss)>=14 else 0
+    rs = avg_gain/avg_loss if avg_loss else 100
+    rsi = 100-(100/(1+rs))
+
+    recent_high = np.max(c[-30:]) if len(c)>=30 else price*1.1
+    recent_low = np.min(c[-30:]) if len(c)>=30 else price*0.9
+    pct_from_high = ((price/recent_high)-1)*100
+    pct_from_low = ((price/recent_low)-1)*100
+
+    if dates and len(dates) >= 20:
+        vl5 = np.mean([float(ts[d]['5. volume']) for d in dates[:5] if '5. volume' in ts[d]])
+        vl20 = np.mean([float(ts[d]['5. volume']) for d in dates[:20] if '5. volume' in ts[d]])
+        vol_ratio = vl5/vl20 if vl20 else 1
+    else:
+        vol_ratio = 1
+
+    score = 0
+    reasons_pos = []
+    reasons_neg = []
+
+    if pe <= 0:
+        score -= 15; reasons_neg.append(f"P/E 0 — company profit नहीं कमा रही, loss में है")
+    elif pe < 15: score += 25; reasons_pos.append(f"P/E {pe:.1f}x — बहुत सस्ता है")
+    elif pe < 25: score += 15; reasons_pos.append(f"P/E {pe:.1f}x — reasonable valuation")
+    elif pe < 40: score += 5; reasons_pos.append(f"P/E {pe:.1f}x — थोड़ा expensive है")
+    else: score -= 10; reasons_neg.append(f"P/E {pe:.1f}x — बहुत महंगा है, risk ज्यादा")
+
+    if fwd_pe and fwd_pe < pe: score += 5; reasons_pos.append(f"Forward P/E {fwd_pe:.1f}x — earnings growth expected")
+
+    if roe > 0.20: score += 20; reasons_pos.append(f"ROE {roe*100:.1f}% — कंपनी पैसा बनाने में माहिर है")
+    elif roe > 0.12: score += 10; reasons_pos.append(f"ROE {roe*100:.1f}% — decent profitability")
+    elif roe <= 0: score -= 15; reasons_neg.append(f"ROE {roe*100:.1f}% — company loss में है")
+
+    if pm > 0.20: score += 15; reasons_pos.append(f"Profit Margin {pm*100:.1f}% — बहुत अच्छा मार्जिन")
+    elif pm > 0.10: score += 8; reasons_pos.append(f"Margin {pm*100:.1f}% — OK है")
+    elif pm <= 0: score -= 10; reasons_neg.append(f"Negative margin — company profit नहीं कमा रही")
+
+    if rev_g > 0.20: score += 15; reasons_pos.append(f"Revenue Growth {rev_g*100:.1f}% — तेजी से बढ़ रही है")
+    elif rev_g > 0.10: score += 8
+    elif rev_g > 0: score += 3
+
+    if de == 0: score += 10; reasons_pos.append("Debt/Eq: 0 — कर्ज नहीं है, बहुत safe")
+    elif de < 1: score += 5; reasons_pos.append(f"Debt/Eq {de:.1f} — low debt")
+    elif de > 3: score -= 10; reasons_neg.append(f"Debt/Eq {de:.1f} — बहुत ज्यादा कर्ज, risk")
+
+    if dy > 0.03: score += 5; reasons_pos.append(f"Dividend {dy*100:.2f}% — अच्छा dividend देती है")
+    elif dy > 0.01: score += 2
+
+    if rsi < 30: score += 15; reasons_pos.append(f"RSI {rsi:.0f} — oversold है, bounce aane ka chance")
+    elif rsi < 45: score += 5; reasons_pos.append(f"RSI {rsi:.0f} — cheap zone mein hai")
+    elif rsi < 60: score += 3
+    elif rsi > 75: score -= 10; reasons_neg.append(f"RSI {rsi:.0f} — overbought, gir sakta hai")
+
+    if pct_ma20 > 0: score += 5; reasons_pos.append(f"Price MA20 से {abs(pct_ma20):.1f}% ऊपर — uptrend में है")
+    elif pct_ma20 < -5: score -= 5; reasons_neg.append(f"Price MA20 से {abs(pct_ma20):.1f}% नीचे — weakness")
+
+    if mom_1w > 2: score += 5; reasons_pos.append(f"Pichle hafte {mom_1w:+.1f}% up — momentum positive")
+    elif mom_1w < -5: score -= 5
+
+    if vol_ratio > 1.3: score += 3; reasons_pos.append(f"Volume {vol_ratio:.1f}x — buying interest badha hai")
+
+    if score >= 50:
+        verdict_type = "buy"
+        verdict_title = "✅ BUY — खरीद सकते हैं"
+        verdict_text = f"Score {score}/100. यह शेयर मजबूत fundamentals और अच्छी technicals के साथ है। खरीदने पर विचार कर सकते हैं।"
+    elif score >= 25:
+        verdict_type = "hold"
+        verdict_title = "🟡 HOLD — रख सकते हैं / Wait करें"
+        verdict_text = f"Score {score}/100. अभी खरीदने का best time नहीं है। अगर पहले से है तो रखें, नया buy सोच समझकर करें।"
+    else:
+        verdict_type = "avoid"
+        verdict_title = "🔴 AVOID — अभी न लें"
+        verdict_text = f"Score {score}/100. इस शेयर में अभी कमजोरी है। खरीदने से बचें। जब fundamentals improve हों तब सोचें।"
+
+    ai_result = ask_ai({
+        'name': name, 'symbol': symbol, 'price': price,
+        'sector': sector, 'industry': industry,
+        'pe': f'{pe:.1f}' if pe else 'Loss', 'fwd_pe': f'{fwd_pe:.1f}' if fwd_pe else 'N/A',
+        'roe_pct': f'{roe*100:.1f}', 'pm_pct': f'{pm*100:.1f}',
+        'rev_g_pct': f'{rev_g*100:.1f}' if rev_g else '0',
+        'de': f'{de:.1f}' if de else '0 (Debt free)',
+        'dy_pct': f'{dy*100:.2f}', 'eps': f'{eps:.2f}' if eps else '0',
+        'mcap_cr': f'{mcap/1e7:.0f}', 'op_margin_pct': f'{op_margin*100:.1f}',
+        'pb': f'{pb:.1f}', 'rsi': f'{rsi:.0f}',
+        'mom_1w': f'{mom_1w:.1f}', 'mom_1m': f'{mom_1m:.1f}',
+        'pct_ma20': f'{pct_ma20:.1f}', 'pct_ma50': f'{pct_ma50:.1f}',
+        'volatility': f'{volatility:.0f}',
+        'high52': high52,
+        'low52': low52,
+    })
+
+    ai_insight = ''
+    if ai_result:
+        verdict_type = ai_result.get('verdict', verdict_type)
+        verdict_title = ai_result.get('verdict_title', verdict_title)
+        verdict_text = ai_result.get('verdict_text', verdict_text)
+        reasons_pos = ai_result.get('reasons_pos', reasons_pos)
+        reasons_neg = ai_result.get('reasons_neg', reasons_neg)
+        ai_insight = ai_result.get('ai_insight', '')
+
+    return {
+        'name': name, 'symbol': symbol, 'price': price,
+        'sector': sector, 'industry': industry,
+        'ai_enabled': AI_ENABLED, 'ai_insight': ai_insight,
+        'changePercent': change_pct,
+        'verdict': {'type': verdict_type, 'title': verdict_title, 'text': verdict_text},
+        'metrics': [
+            {'label': 'Score', 'value': f'{score}/100', 'status': 'good' if score>=50 else ('neutral' if score>=25 else 'bad')},
+            {'label': 'P/E', 'value': f'{pe:.1f}x' if pe>0 else 'Loss', 'status': 'good' if 0<pe<20 else ('bad' if pe<=0 or pe>40 else 'neutral')},
+            {'label': 'ROE', 'value': f'{roe*100:.1f}%', 'status': 'good' if roe>0.2 else ('bad' if roe<0.05 else 'neutral')},
+            {'label': 'Profit Margin', 'value': f'{pm*100:.1f}%', 'status': 'good' if pm>0.2 else ('bad' if pm<0.05 else 'neutral')},
+            {'label': 'RSI', 'value': f'{rsi:.0f}', 'status': 'good' if rsi<40 else ('bad' if rsi>70 else 'neutral')},
+            {'label': 'Momentum', 'value': f'{mom_1w:+.1f}%', 'status': 'good' if mom_1w>2 else ('bad' if mom_1w<-3 else 'neutral')},
+        ],
+        'details': [
+            {'label': 'Revenue Growth', 'value': f'{rev_g*100:.1f}%'},
+            {'label': 'Debt/Equity', 'value': f'{de:.1f}' if de else '0 (Debt free)'},
+            {'label': 'Dividend Yield', 'value': f'{dy*100:.2f}%'},
+            {'label': 'EPS', 'value': f'₹{eps:.2f}'},
+            {'label': 'P/B', 'value': f'{pb:.1f}x'},
+            {'label': 'Mkt Cap', 'value': f'₹{mcap/1e7:.0f}Cr'},
+            {'label': 'Operating Margin', 'value': f'{op_margin*100:.1f}%'},
+            {'label': 'Forward P/E', 'value': f'{fwd_pe:.1f}x' if fwd_pe else '-'},
+            {'label': 'Volatility', 'value': f'{volatility:.0f}%'},
+            {'label': 'MA20 Distance', 'value': f'{pct_ma20:+.1f}%'},
+            {'label': 'MA50 Distance', 'value': f'{pct_ma50:+.1f}%'},
+            {'label': 'Volume Ratio', 'value': f'{vol_ratio:.1f}x'},
+            {'label': '52W High', 'value': f'₹{high52:.2f}'},
+            {'label': '52W Low', 'value': f'₹{low52:.2f}'},
+        ],
+        'reasons_pos': reasons_pos,
+        'reasons_neg': reasons_neg,
+        'news': [{'title': f'{name} — check moneycontrol.com or economictimes for latest news', 'link': '', 'source': ''}],
+        'score': score,
+    }
+
 
 def analyze_stock(symbol):
     t = yf.Ticker(symbol+'.NS')
@@ -450,14 +688,19 @@ def analyze():
         result = analyze_stock(symbol)
         set_cache(symbol, result)
         return jsonify(result)
-    except Exception as e:
-        stale = get_cached(symbol, allow_stale=True)
-        if stale:
-            return jsonify(stale)
-        msg = str(e)
-        if 'rate' in msg.lower() or '429' in msg:
-            return jsonify({'error': '🕐 Stock market data temporarirly unavailable. Yahoo Finance se data nahi aa raha. 2-3 minute baad try karein.'})
-        return jsonify({'error': f'{msg[:100]}'})
+    except:
+        pass
+    try:
+        if AV_ENABLED:
+            result = analyze_stock_av(symbol)
+            set_cache(symbol, result)
+            return jsonify(result)
+    except:
+        pass
+    stale = get_cached(symbol, allow_stale=True)
+    if stale:
+        return jsonify(stale)
+    return jsonify({'error': '🕐 Stock market data temporarily unavailable. Yahoo aur Alpha Vantage dono se data nahi aa raha. Thodi der baad try karein.'})
 
 
 
