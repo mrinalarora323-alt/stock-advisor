@@ -9,8 +9,8 @@ _ssl_ctx.verify_mode = ssl.CERT_NONE
 
 # Rate limiter & retry for yfinance
 _yf_last_call = 0
-_YF_MIN_INTERVAL = 1.0
-_YF_MAX_RETRIES = 3
+_YF_MIN_INTERVAL = 2.0
+_YF_MAX_RETRIES = 5
 
 def _yf_call(fn, *args, **kwargs):
     global _yf_last_call
@@ -22,14 +22,15 @@ def _yf_call(fn, *args, **kwargs):
         try:
             return fn(*args)
         except Exception as e:
-            if 'Too Many Requests' in str(e) or '429' in str(e):
-                time_module.sleep(2 ** attempt)
+            msg = str(e)
+            if 'Too Many Requests' in msg or '429' in msg or 'rate' in msg.lower():
+                time_module.sleep(3 ** attempt)
                 continue
             raise
-    return None
+    raise Exception("Yahoo Finance API rate limited. Try again in a few minutes.")
 
 def _get_ticker(symbol):
-    return _yf_call(lambda s: yf.Ticker(s+'.NS'), symbol)
+    return yf.Ticker(symbol+'.NS')
 
 def _get_info(ticker):
     return _yf_call(lambda t: t.info, ticker)
@@ -39,18 +40,23 @@ def _get_history(ticker, period='3mo'):
 
 app = Flask(__name__)
 
-# Simple in-memory cache to avoid yfinance rate limits
+# Aggressive cache — once fetched, serve for 1 hour
 _cache = {}
-CACHE_TTL = 300  # 5 min
+CACHE_TTL = 3600  # 1 hour
+_STALE_TTL = 86400  # 24 hours — serve stale data if fresh fails
 
-def get_cached(key):
+def get_cached(key, allow_stale=False):
     now = time_module.time()
-    if key in _cache and now - _cache[key]['time'] < CACHE_TTL:
-        return _cache[key]['data']
+    if key in _cache:
+        age = now - _cache[key]['time']
+        if age < CACHE_TTL or (allow_stale and age < _STALE_TTL):
+            return _cache[key]['data']
     return None
 
 def set_cache(key, data):
     _cache[key] = {'data': data, 'time': time_module.time()}
+
+
 
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 OPENROUTER_KEY = os.environ.get('OPENROUTER_API_KEY', '')
@@ -217,6 +223,8 @@ SPACELESS_MAP = {k.replace(' ', ''): v for k, v in NAME_MAP.items()}
 
 def resolve_symbol(query):
     q = query.strip().upper()
+    if len(q) < 2:
+        return None
     if q.endswith('.NS'): q = q[:-3]
     
     # Clean out question words & punctuation for matching
@@ -474,16 +482,22 @@ def analyze():
     if not symbol:
         return jsonify({'error': f'"{q}" का symbol नहीं मिला। कोई और नाम try करें।'})
     
-    cached = get_cached(symbol)
-    if cached:
-        return jsonify(cached)
+    data = get_cached(symbol)
+    if data:
+        return jsonify(data)
     
     try:
         result = analyze_stock(symbol)
         set_cache(symbol, result)
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': f'Analysis failed: {str(e)}'})
+        stale = get_cached(symbol, allow_stale=True)
+        if stale:
+            return jsonify(stale)
+        msg = str(e)
+        if 'rate' in msg.lower() or '429' in msg:
+            return jsonify({'error': '🕐 Stock market data temporarirly unavailable. Yahoo Finance se data nahi aa raha. 2-3 minute baad try karein.'})
+        return jsonify({'error': f'{msg[:100]}'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5002))
