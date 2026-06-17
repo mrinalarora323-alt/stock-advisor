@@ -247,7 +247,7 @@ def resolve_symbol(query):
     if AV_ENABLED:
         for trial in candidates or [q]:
             tu = trial.upper()
-            for av_sym in (f'{tu}.NS', f'{tu}.BSE'):
+            for av_sym in (f'{tu}.BSE', f'{tu}.NS'):
                 try:
                     q = av_get({'function': 'GLOBAL_QUOTE', 'symbol': av_sym})
                     if q and q.get('Global Quote', {}).get('05. price'):
@@ -273,7 +273,7 @@ def resolve_symbol(query):
                 continue
             for sym in sorted(set(NAME_MAP.values())):
                 try:
-                    o = av_get({'function': 'OVERVIEW', 'symbol': f'{sym}.NS'})
+                    o = av_get({'function': 'OVERVIEW', 'symbol': f'{sym}.BSE'})
                     if o and o.get('Name', '').lower() and ql in o.get('Name', '').lower():
                         return sym
                 except:
@@ -287,11 +287,11 @@ def resolve_symbol(query):
     return None
 
 def analyze_stock_av(symbol):
-    av_sym = f'{symbol}.NS'
+    av_sym = f'{symbol}.BSE'
     q = av_get({'function': 'GLOBAL_QUOTE', 'symbol': av_sym})
     gq = (q or {}).get('Global Quote', {})
     if not gq or '05. price' not in gq:
-        av_sym = f'{symbol}.BSE'
+        av_sym = f'{symbol}.NS'
         q = av_get({'function': 'GLOBAL_QUOTE', 'symbol': av_sym})
         gq = (q or {}).get('Global Quote', {})
     if not gq or '05. price' not in gq:
