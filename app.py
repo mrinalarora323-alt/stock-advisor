@@ -471,6 +471,27 @@ def analyze():
             return jsonify({'error': '🕐 Stock market data temporarirly unavailable. Yahoo Finance se data nahi aa raha. 2-3 minute baad try karein.'})
         return jsonify({'error': f'{msg[:100]}'})
 
+# Pre-fetch popular stocks in background so cache is warm
+_PREFETCH = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'ITC',
+             'SBIN', 'AXISBANK', 'BAJFINANCE', 'LT', 'WIPRO', 'MARUTI',
+             'TITAN', 'NTPC', 'ONGC', 'SUNPHARMA', 'ADANIENT', 'BHARTIARTL',
+             'KOTAKBANK', 'HINDUNILVR', 'TATAMOTORS', 'TATASTEEL', 'POWERGRID',
+             'JSWSTEEL', 'BPCL', 'M&M', 'GRASIM', 'TRENT']
+
+def _run_prefetch():
+    for sym in _PREFETCH:
+        if get_cached(sym):
+            continue
+        try:
+            r = analyze_stock(sym)
+            set_cache(sym, r)
+        except:
+            pass
+        time_module.sleep(1.5)
+
+import threading
+threading.Thread(target=_run_prefetch, daemon=True).start()
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5002))
     print(f'  Stock Advisor: http://localhost:{port}')
