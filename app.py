@@ -83,7 +83,7 @@ def ask_ai(stock_data):
         try:
             return call_llm_api(
                 "https://api.groq.com/openai/v1/chat/completions",
-                "mixtral-8x7b-32768",
+                "llama-3.3-70b-versatile",
                 GROQ_API_KEY, stock_data
             )
         except:
