@@ -7,6 +7,36 @@ _ssl_ctx = ssl.create_default_context()
 _ssl_ctx.check_hostname = False
 _ssl_ctx.verify_mode = ssl.CERT_NONE
 
+# Rate limiter & retry for yfinance
+_yf_last_call = 0
+_YF_MIN_INTERVAL = 1.0
+_YF_MAX_RETRIES = 3
+
+def _yf_call(fn, *args, **kwargs):
+    global _yf_last_call
+    for attempt in range(_YF_MAX_RETRIES):
+        elapsed = time_module.time() - _yf_last_call
+        if elapsed < _YF_MIN_INTERVAL:
+            time_module.sleep(_YF_MIN_INTERVAL - elapsed)
+        _yf_last_call = time_module.time()
+        try:
+            return fn(*args)
+        except Exception as e:
+            if 'Too Many Requests' in str(e) or '429' in str(e):
+                time_module.sleep(2 ** attempt)
+                continue
+            raise
+    return None
+
+def _get_ticker(symbol):
+    return _yf_call(lambda s: yf.Ticker(s+'.NS'), symbol)
+
+def _get_info(ticker):
+    return _yf_call(lambda t: t.info, ticker)
+
+def _get_history(ticker, period='3mo'):
+    return _yf_call(lambda t: t.history(period=period), ticker)
+
 app = Flask(__name__)
 
 # Simple in-memory cache to avoid yfinance rate limits
@@ -216,8 +246,7 @@ def resolve_symbol(query):
     # Try yfinance with cleaned query
     for trial in candidates or [q]:
         try:
-            t = yf.Ticker(trial.upper()+'.NS')
-            info = t.info
+            info = _get_info(_get_ticker(trial.upper()))
             if info.get('regularMarketPrice') or info.get('currentPrice'):
                 return trial.upper()
         except:
@@ -225,14 +254,12 @@ def resolve_symbol(query):
     
     # Fuzzy match each candidate against company names
     for trial in candidates or [q]:
-        t_upper = trial.upper()
         ql = trial.lower()
         if len(ql) < 3:
             continue
         for sym in sorted(set(NAME_MAP.values())):
             try:
-                t = yf.Ticker(sym+'.NS')
-                info = t.info
+                info = _get_info(_get_ticker(sym))
                 n = (info.get('longName') or '').lower()
                 if n and (ql in n):
                     return sym
@@ -242,8 +269,8 @@ def resolve_symbol(query):
     return None
 
 def analyze_stock(symbol):
-    t = yf.Ticker(symbol+'.NS')
-    info = t.info
+    t = _get_ticker(symbol)
+    info = _get_info(t)
     
     price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose', 0)
     name = info.get('longName', symbol)
@@ -265,7 +292,7 @@ def analyze_stock(symbol):
     op_margin = info.get('operatingMargins') or 0
     
     # Historical data for technicals
-    hist = t.history(period='3mo')
+    hist = _get_history(t)
     c = hist['Close'].dropna().values
     
     # Technicals
@@ -383,7 +410,7 @@ def analyze_stock(symbol):
     # Fetch news
     news_list = []
     try:
-        raw_news = t.news or []
+        raw_news = (_yf_rate_limit(), t.news or [])[1]
         for item in raw_news[:5]:
             title = item.get('title', '')
             link = item.get('link', '')
