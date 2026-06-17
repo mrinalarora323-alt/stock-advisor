@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Stock Advisor — Buy ya Nahi?</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;background:#0f0f1a;color:#e0e0e0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:40px 20px}
+.container{max-width:800px;width:100%}
+h1{font-size:32px;color:#fff;text-align:center;margin-bottom:8px}
+.sub{text-align:center;color:#888;margin-bottom:40px;font-size:16px}
+.search-box{display:flex;gap:12px;margin-bottom:40px}
+.search-box input{flex:1;padding:16px 20px;border-radius:12px;border:2px solid #2a2a3e;background:#1a1a2e;color:#fff;font-size:18px;outline:none;transition:border .2s}
+.search-box input:focus{border-color:#6366f1}
+.search-box button{padding:16px 32px;border-radius:12px;border:none;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-size:16px;font-weight:600;cursor:pointer;transition:transform .1s;white-space:nowrap}
+.search-box button:hover{transform:scale(1.02)}
+.search-box button:disabled{opacity:.5;cursor:not-allowed}
+.examples{text-align:center;margin-bottom:40px;color:#666;font-size:14px}
+.examples span{cursor:pointer;color:#818cf8;text-decoration:underline;margin:0 6px}
+.loading{text-align:center;padding:40px;display:none}
+.loading .spinner{width:48px;height:48px;border:4px solid #2a2a3e;border-top-color:#6366f1;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading p{color:#888}
+.card{background:#1a1a2e;border-radius:16px;padding:32px;margin-bottom:20px;display:none}
+.card.show{display:block}
+.stock-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px}
+.stock-name h2{font-size:28px;color:#fff}
+.stock-name .sector{font-size:14px;color:#888;margin-top:4px}
+.stock-price{text-align:right}
+.stock-price .price{font-size:36px;font-weight:700;color:#fff}
+.stock-price .change{font-size:16px;margin-top:4px}
+.verdict-box{padding:20px;border-radius:12px;margin-bottom:24px;text-align:center}
+.verdict-box h3{font-size:24px;margin-bottom:8px}
+.verdict-box p{font-size:16px;line-height:1.6}
+.verdict-buy{background:rgba(0,200,83,.15);border:1px solid #00c853}
+.verdict-buy h3{color:#00c853}
+.verdict-hold{background:rgba(255,193,7,.15);border:1px solid #ffc107}
+.verdict-hold h3{color:#ffc107}
+.verdict-avoid{background:rgba(255,23,68,.15);border:1px solid #ff1744}
+.verdict-avoid h3{color:#ff1744}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}
+.metric{background:#2a2a3e;border-radius:10px;padding:16px;text-align:center}
+.metric .label{font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.5px}
+.metric .value{font-size:20px;font-weight:600;color:#fff;margin-top:4px}
+.metric .good{color:#00c853}
+.metric .bad{color:#ff1744}
+.metric .neutral{color:#ffc107}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.detail-item{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #2a2a3e;font-size:15px}
+.detail-item .lbl{color:#888}
+.detail-item .val{font-weight:500}
+.reason-list{padding-left:20px;margin-top:12px}
+.reason-list li{margin-bottom:8px;line-height:1.5;font-size:15px;color:#ccc}
+.error{background:#2a1a1a;border:1px solid #ff1744;border-radius:12px;padding:20px;text-align:center;display:none;color:#ff6b6b;font-size:16px}
+.error.show{display:block}
+.green{color:#00c853}
+.red{color:#ff1744}
+.yellow{color:#ffc107}
+@media(max-width:600px){
+  .search-box{flex-direction:column}
+  .stock-header{flex-direction:column}
+  .stock-price{text-align:left}
+  .detail-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📈 Stock Advisor</h1>
+  <p class="sub">कोई भी शेयर लिखो — खरीदना चाहिए या नहीं, हम बताएंगे</p>
+
+  <div class="search-box">
+    <input type="text" id="stockInput" placeholder="जैसे: ITC, HDFCBANK, Reliance, ICICI Bank..." autocomplete="off">
+    <button id="searchBtn" onclick="analyze()">🔍 Check</button>
+  </div>
+
+  <div class="examples">
+    जैसे: <span onclick="selectStock('ITC')">ITC</span> · <span onclick="selectStock('TCS')">TCS</span> · <span onclick="selectStock('RELIANCE')">Reliance</span> · <span onclick="selectStock('HDFCBANK')">HDFC Bank</span> · <span onclick="selectStock('ICICIBANK')">ICICI Bank</span>
+  </div>
+
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <p>Analysis हो रहा है...</p>
+  </div>
+
+  <div class="error" id="error"></div>
+
+  <div class="card" id="result">
+    <div class="stock-header">
+      <div class="stock-name">
+        <h2 id="companyName">-</h2>
+        <div class="sector" id="sector">-</div>
+      </div>
+      <div class="stock-price">
+        <div class="price" id="price">₹-</div>
+        <div class="change" id="change">-</div>
+      </div>
+    </div>
+
+    <div class="verdict-box" id="verdictBox">
+      <h3 id="verdictTitle">-</h3>
+      <p id="verdictText">-</p>
+    </div>
+
+    <div class="metrics" id="metrics"></div>
+
+    <h3 style="color:#fff;margin-bottom:16px;font-size:18px">📊 Detailed Analysis</h3>
+    <div class="detail-grid" id="details"></div>
+
+    <div id="reasonsSection" style="display:none">
+      <div style="background:#1a2e1a;border-radius:12px;padding:20px;margin-bottom:16px" id="posReasons">
+        <h3 style="color:#00c853;margin-bottom:10px;font-size:16px">✅ क्यों खरीदें — Positive Reasons</h3>
+        <ul class="reason-list" id="posReasonsList"></ul>
+      </div>
+      <div style="background:#2e1a1a;border-radius:12px;padding:20px;margin-bottom:16px" id="negReasons">
+        <h3 style="color:#ff1744;margin-bottom:10px;font-size:16px">❌ क्यों न खरीदें — Negative Reasons</h3>
+        <ul class="reason-list" id="negReasonsList"></ul>
+      </div>
+    </div>
+
+    <div id="newsSection" style="display:none;background:#1a1a2e;border-radius:12px;padding:20px;margin-top:16px">
+      <h3 style="color:#fff;margin-bottom:12px;font-size:16px">📰 Latest News</h3>
+      <div id="newsList"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+function selectStock(s){document.getElementById('stockInput').value=s;analyze()}
+document.getElementById('stockInput').addEventListener('keydown',e=>{if(e.key==='Enter')analyze()})
+
+async function analyze(){
+  const input=document.getElementById('stockInput').value.trim()
+  if(!input)return
+  document.getElementById('loading').style.display='block'
+  document.getElementById('result').classList.remove('show')
+  document.getElementById('error').classList.remove('show')
+  document.getElementById('searchBtn').disabled=true
+  try{
+    const res=await fetch('/analyze?q='+encodeURIComponent(input))
+    const data=await res.json()
+    if(data.error){
+      document.getElementById('error').textContent=data.error
+      document.getElementById('error').classList.add('show')
+      return
+    }
+    showResult(data)
+  }catch(e){
+    document.getElementById('error').textContent='Server error. Try again.'
+    document.getElementById('error').classList.add('show')
+  }finally{
+    document.getElementById('loading').style.display='none'
+    document.getElementById('searchBtn').disabled=false
+  }
+}
+
+function showResult(d){
+  document.getElementById('companyName').textContent=d.name
+  document.getElementById('sector').textContent=d.sector+(d.industry?' — '+d.industry:'')
+  document.getElementById('price').textContent='₹'+d.price.toFixed(2)
+  const chg=d.changePercent
+  document.getElementById('change').textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%'
+  document.getElementById('change').className='change '+(chg>=0?'green':'red')
+
+  const vb=document.getElementById('verdictBox')
+  vb.className='verdict-box verdict-'+d.verdict.type
+  document.getElementById('verdictTitle').textContent=d.verdict.title
+  document.getElementById('verdictText').textContent=d.verdict.text
+
+  const m=document.getElementById('metrics')
+  m.innerHTML=''
+  d.metrics.forEach(item=>{
+    m.innerHTML+='<div class="metric"><div class="label">'+item.label+'</div><div class="value '+(item.status||'')+'">'+item.value+'</div></div>'
+  })
+
+  const dt=document.getElementById('details')
+  dt.innerHTML=''
+  d.details.forEach(item=>{
+    dt.innerHTML+='<div class="detail-item"><span class="lbl">'+item.label+'</span><span class="val '+(item.status||'')+'">'+item.value+'</span></div>'
+  })
+
+  const pr=document.getElementById('posReasonsList')
+  const nr=document.getElementById('negReasonsList')
+  pr.innerHTML=''; nr.innerHTML=''
+
+  const pos=d.reasons_pos||[]
+  const neg=d.reasons_neg||[]
+
+  document.getElementById('reasonsSection').style.display=(pos.length||neg.length)?'block':'none'
+
+  pos.forEach(item=>{pr.innerHTML+='<li style="color:#a5d6a7">'+item+'</li>'})
+  neg.forEach(item=>{nr.innerHTML+='<li style="color:#ef9a9a">'+item+'</li>'})
+
+  // News
+  const nl=document.getElementById('newsList')
+  nl.innerHTML=''
+  const news=d.news||[]
+  document.getElementById('newsSection').style.display=news.length?'block':'none'
+  news.forEach(item=>{
+    nl.innerHTML+='<div style="padding:10px 0;border-bottom:1px solid #2a2a3e;font-size:14px">'+
+      (item.link?'<a href="'+item.link+'" target="_blank" style="color:#818cf8;text-decoration:none">':'')+
+      item.title+
+      (item.link?'</a>':'')+
+      (item.source?' <span style="color:#666;font-size:12px">— '+item.source+'</span>':'')+
+    '</div>'
+  })
+
+  document.getElementById('result').classList.add('show')
+  document.getElementById('result').scrollIntoView({behavior:'smooth'})
+}
+</script>
+</body>
+</html>
