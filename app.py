@@ -169,13 +169,13 @@ def resolve_symbol(query):
     
     # Fuzzy: check if query matches any company name
     if len(q) >= 3:
-        best_match = None
-        for sym in list(set(NAME_MAP.values())):
+        ql = q.lower()
+        for sym in sorted(set(NAME_MAP.values())):
             try:
                 t = yf.Ticker(sym+'.NS')
                 info = t.info
                 n = (info.get('longName') or '').lower()
-                if q.lower() in n or n in q.lower() or q.lower()[:4] in n:
+                if n and (ql in n or n in ql):
                     return sym
             except:
                 pass
