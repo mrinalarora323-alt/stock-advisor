@@ -7,37 +7,6 @@ _ssl_ctx = ssl.create_default_context()
 _ssl_ctx.check_hostname = False
 _ssl_ctx.verify_mode = ssl.CERT_NONE
 
-# Rate limiter & retry for yfinance
-_yf_last_call = 0
-_YF_MIN_INTERVAL = 2.0
-_YF_MAX_RETRIES = 5
-
-def _yf_call(fn, *args, **kwargs):
-    global _yf_last_call
-    for attempt in range(_YF_MAX_RETRIES):
-        elapsed = time_module.time() - _yf_last_call
-        if elapsed < _YF_MIN_INTERVAL:
-            time_module.sleep(_YF_MIN_INTERVAL - elapsed)
-        _yf_last_call = time_module.time()
-        try:
-            return fn(*args)
-        except Exception as e:
-            msg = str(e)
-            if 'Too Many Requests' in msg or '429' in msg or 'rate' in msg.lower():
-                time_module.sleep(3 ** attempt)
-                continue
-            raise
-    raise Exception("Yahoo Finance API rate limited. Try again in a few minutes.")
-
-def _get_ticker(symbol):
-    return yf.Ticker(symbol+'.NS')
-
-def _get_info(ticker):
-    return _yf_call(lambda t: t.info, ticker)
-
-def _get_history(ticker, period='3mo'):
-    return _yf_call(lambda t: t.history(period=period), ticker)
-
 app = Flask(__name__)
 
 # Aggressive cache — once fetched, serve for 1 hour
@@ -251,23 +220,25 @@ def resolve_symbol(query):
         if tu in NAME_MAP:
             return NAME_MAP[tu]
     
-    # Try yfinance with cleaned query
+    # Try yfinance
     for trial in candidates or [q]:
         try:
-            info = _get_info(_get_ticker(trial.upper()))
+            t = yf.Ticker(trial.upper()+'.NS')
+            info = t.info
             if info.get('regularMarketPrice') or info.get('currentPrice'):
                 return trial.upper()
         except:
             pass
     
-    # Fuzzy match each candidate against company names
+    # Fuzzy match
     for trial in candidates or [q]:
         ql = trial.lower()
         if len(ql) < 3:
             continue
         for sym in sorted(set(NAME_MAP.values())):
             try:
-                info = _get_info(_get_ticker(sym))
+                t = yf.Ticker(sym+'.NS')
+                info = t.info
                 n = (info.get('longName') or '').lower()
                 if n and (ql in n):
                     return sym
@@ -277,8 +248,10 @@ def resolve_symbol(query):
     return None
 
 def analyze_stock(symbol):
-    t = _get_ticker(symbol)
-    info = _get_info(t)
+    t = yf.Ticker(symbol+'.NS')
+    info = t.info
+    if info is None:
+        raise Exception("Yahoo Finance se data nahi mila. Try again.")
     
     price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose', 0)
     name = info.get('longName', symbol)
@@ -291,16 +264,15 @@ def analyze_stock(symbol):
     pm = info.get('profitMargins') or 0
     de = info.get('debtToEquity') or 0
     raw_dy = info.get('dividendYield') or 0
-    dy = raw_dy / 100 if raw_dy > 1 else raw_dy  # yfinance returns % or decimal inconsistently
+    dy = raw_dy / 100 if raw_dy > 1 else raw_dy
     eps = info.get('trailingEps') or 0
     rev_g = info.get('revenueGrowth') or 0
     mcap = info.get('marketCap') or 0
     pb = info.get('priceToBook') or 0
-    current_ratio = info.get('currentRatio') or 0
     op_margin = info.get('operatingMargins') or 0
+    change_pct = info.get('regularMarketChangePercent', 0) or 0
     
-    # Historical data for technicals
-    hist = _get_history(t)
+    hist = t.history(period='3mo')
     c = hist['Close'].dropna().values
     
     # Technicals
@@ -418,7 +390,7 @@ def analyze_stock(symbol):
     # Fetch news
     news_list = []
     try:
-        raw_news = (_yf_rate_limit(), t.news or [])[1]
+        raw_news = t.news or []
         for item in raw_news[:5]:
             title = item.get('title', '')
             link = item.get('link', '')
