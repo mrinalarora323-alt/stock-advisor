@@ -1,63 +1,103 @@
-import yfinance as yf, numpy as np, warnings, os, json, re
+import yfinance as yf, numpy as np, warnings, os, json, re, time as time_module
 from flask import Flask, request, jsonify, render_template
+from urllib.request import Request, urlopen
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
 
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
-AI_ENABLED = bool(GEMINI_API_KEY)
+# Simple in-memory cache to avoid yfinance rate limits
+_cache = {}
+CACHE_TTL = 300  # 5 min
+
+def get_cached(key):
+    now = time_module.time()
+    if key in _cache and now - _cache[key]['time'] < CACHE_TTL:
+        return _cache[key]['data']
+    return None
+
+def set_cache(key, data):
+    _cache[key] = {'data': data, 'time': time_module.time()}
+
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
+OPENROUTER_KEY = os.environ.get('OPENROUTER_API_KEY', '')
+AI_ENABLED = bool(GROQ_API_KEY or OPENROUTER_KEY)
+
+AI_PROMPT = """You are a professional Indian stock market analyst. Analyze this stock and give a clear BUY/HOLD/AVOID verdict.
+
+Stock Data:
+- Name: {name}
+- Symbol: {symbol}
+- Sector: {sector} | Industry: {industry}
+- Current Price: ₹{price}
+- P/E: {pe} | Forward P/E: {fwd_pe}
+- ROE: {roe_pct}% | Profit Margin: {pm_pct}%
+- Revenue Growth: {rev_g_pct}%
+- Debt/Equity: {de}
+- Dividend Yield: {dy_pct}%
+- EPS: ₹{eps}
+- Market Cap: ₹{mcap_cr}Cr
+- Operating Margin: {op_margin_pct}%
+- P/B: {pb}
+
+Technical Indicators:
+- RSI (14): {rsi}
+- 1 Week Change: {mom_1w}%
+- 1 Month Change: {mom_1m}%
+- Price vs MA20: {pct_ma20}%
+- Price vs MA50: {pct_ma50}%
+- Volatility: {volatility}%
+- 52W High: ₹{high52} | 52W Low: ₹{low52}
+
+Respond ONLY with a valid JSON object (no markdown, no backticks):
+{{
+  "verdict": "buy" or "hold" or "avoid",
+  "verdict_title": "short emoji + title in Hinglish",
+  "verdict_text": "2-3 line explanation in Hinglish",
+  "reasons_pos": ["reason 1 in Hinglish", "reason 2 in Hinglish"],
+  "reasons_neg": ["reason 1 in Hinglish", "reason 2 in Hinglish"],
+  "ai_insight": "1-2 line unique insight about this stock in Hinglish"
+}}"""
+
+def call_llm_api(url, model, api_key, body_template):
+    prompt = AI_PROMPT.format(**body_template)
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": 1024,
+    }).encode()
+    req = Request(url, data=body,
+                  headers={"Authorization": f"Bearer {api_key}",
+                           "Content-Type": "application/json"})
+    resp = json.loads(urlopen(req, timeout=30).read())
+    text = resp["choices"][0]["message"]["content"].strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text)
+    text = re.sub(r'\s*```$', '', text)
+    return json.loads(text)
 
 def ask_ai(stock_data):
     if not AI_ENABLED:
         return None
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-2.0-flash-lite')
-        
-        prompt = f"""You are a professional Indian stock market analyst. Analyze this stock and give a clear BUY/HOLD/AVOID verdict.
-
-Stock Data:
-- Name: {stock_data['name']}
-- Symbol: {stock_data['symbol']}
-- Sector: {stock_data['sector']} | Industry: {stock_data['industry']}
-- Current Price: ₹{stock_data['price']}
-- P/E: {stock_data['pe']} | Forward P/E: {stock_data['fwd_pe']}
-- ROE: {stock_data['roe_pct']}% | Profit Margin: {stock_data['pm_pct']}%
-- Revenue Growth: {stock_data['rev_g_pct']}%
-- Debt/Equity: {stock_data['de']}
-- Dividend Yield: {stock_data['dy_pct']}%
-- EPS: ₹{stock_data['eps']}
-- Market Cap: ₹{stock_data['mcap_cr']}Cr
-- Operating Margin: {stock_data['op_margin_pct']}%
-- P/B: {stock_data['pb']}
-
-Technical Indicators:
-- RSI (14): {stock_data['rsi']}
-- 1 Week Change: {stock_data['mom_1w']}%
-- 1 Month Change: {stock_data['mom_1m']}%
-- Price vs MA20: {stock_data['pct_ma20']}%
-- Price vs MA50: {stock_data['pct_ma50']}%
-- Volatility: {stock_data['volatility']}%
-- 52W High: ₹{stock_data['high52']} | 52W Low: ₹{stock_data['low52']}
-
-Respond in THIS EXACT JSON format (no markdown, no code blocks):
-{{
-  "verdict": "buy" or "hold" or "avoid",
-  "verdict_title": "short title",
-  "verdict_text": "2-3 line explanation in Hinglish",
-  "reasons_pos": ["reason 1 in Hinglish", "reason 2 in Hinglish", ...],
-  "reasons_neg": ["reason 1 in Hinglish", "reason 2 in Hinglish", ...],
-  "ai_insight": "1-2 line unique insight about this stock in Hinglish"
-}}"""
-
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        text = re.sub(r'^```(?:json)?\s*', '', text)
-        text = re.sub(r'\s*```$', '', text)
-        return json.loads(text)
-    except:
-        return None
+    # Try Groq first, then OpenRouter
+    if GROQ_API_KEY:
+        try:
+            return call_llm_api(
+                "https://api.groq.com/openai/v1/chat/completions",
+                "mixtral-8x7b-32768",
+                GROQ_API_KEY, stock_data
+            )
+        except:
+            pass
+    if OPENROUTER_KEY:
+        try:
+            return call_llm_api(
+                "https://openrouter.ai/api/v1/chat/completions",
+                "mistralai/mistral-7b-instruct:free",
+                OPENROUTER_KEY, stock_data
+            )
+        except:
+            pass
+    return None
 
 # Name-to-ticker mapping for common stocks
 NAME_MAP = {
@@ -143,39 +183,53 @@ SPACELESS_MAP = {k.replace(' ', ''): v for k, v in NAME_MAP.items()}
 def resolve_symbol(query):
     q = query.strip().upper()
     if q.endswith('.NS'): q = q[:-3]
-    key = q.lower().replace(' ', '').replace('.', '').replace(',', '')
     
-    # Direct match in map
-    if q in NAME_MAP.values():
-        return q
-    if q.lower() in NAME_MAP:
-        return NAME_MAP[q.lower()]
-    if key in SPACELESS_MAP:
-        return SPACELESS_MAP[key]
-    if q in NAME_MAP:
-        return NAME_MAP[q]
+    # Clean out question words & punctuation for matching
+    words = q.replace('?', '').replace('!', '').replace('.', '').split()
+    stop_words = {'IS', 'ARE', 'DO', 'DOES', 'CAN', 'SHOULD', 'WILL', 'WOULD',
+                  'GOOD', 'BAD', 'BEST', 'WORST', 'BUY', 'SELL', 'HOLD', 'CHECK',
+                  'A', 'AN', 'THE', 'FOR', 'TO', 'OF', 'IN', 'AT', 'BY'}
+    candidates = [w for w in words if w not in stop_words]
+    clean_q = ' '.join(candidates) if candidates else q
+    clean_lower = clean_q.lower().replace(' ', '')
     
-    # Try yfinance directly
-    try:
-        t = yf.Ticker(q+'.NS')
-        info = t.info
-        if info.get('regularMarketPrice') or info.get('currentPrice'):
-            return q
-        name = (info.get('longName') or '').lower()
-        if name and name != q.lower():
-            return q
-    except:
-        pass
+    # Try longest candidates first
+    for trial in sorted(candidates or [q], key=len, reverse=True):
+        tu = trial.upper()
+        tl = trial.lower()
+        key = tl.replace(' ', '').replace(',', '')
+        
+        if tu in NAME_MAP.values():
+            return tu
+        if tl in NAME_MAP:
+            return NAME_MAP[tl]
+        if key in SPACELESS_MAP:
+            return SPACELESS_MAP[key]
+        if tu in NAME_MAP:
+            return NAME_MAP[tu]
     
-    # Fuzzy: check if query matches any company name
-    if len(q) >= 3:
-        ql = q.lower()
+    # Try yfinance with cleaned query
+    for trial in candidates or [q]:
+        try:
+            t = yf.Ticker(trial.upper()+'.NS')
+            info = t.info
+            if info.get('regularMarketPrice') or info.get('currentPrice'):
+                return trial.upper()
+        except:
+            pass
+    
+    # Fuzzy match each candidate against company names
+    for trial in candidates or [q]:
+        t_upper = trial.upper()
+        ql = trial.lower()
+        if len(ql) < 3:
+            continue
         for sym in sorted(set(NAME_MAP.values())):
             try:
                 t = yf.Ticker(sym+'.NS')
                 info = t.info
                 n = (info.get('longName') or '').lower()
-                if n and (ql in n or n in ql):
+                if n and (ql in n):
                     return sym
             except:
                 pass
@@ -388,8 +442,13 @@ def analyze():
     if not symbol:
         return jsonify({'error': f'"{q}" का symbol नहीं मिला। कोई और नाम try करें।'})
     
+    cached = get_cached(symbol)
+    if cached:
+        return jsonify(cached)
+    
     try:
         result = analyze_stock(symbol)
+        set_cache(symbol, result)
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': f'Analysis failed: {str(e)}'})

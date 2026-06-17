@@ -2,4 +2,3 @@ flask
 yfinance
 numpy
 gunicorn
-google-generativeai
