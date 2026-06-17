@@ -1,11 +1,6 @@
-import yfinance as yf, numpy as np, warnings, os, json, re, time as time_module, ssl
+import yfinance as yf, numpy as np, warnings, os, json, re, time as time_module
 from flask import Flask, request, jsonify, render_template
-from urllib.request import Request, urlopen
 warnings.filterwarnings('ignore')
-
-_ssl_ctx = ssl.create_default_context()
-_ssl_ctx.check_hostname = False
-_ssl_ctx.verify_mode = ssl.CERT_NONE
 
 app = Flask(__name__)
 
@@ -225,7 +220,7 @@ def resolve_symbol(query):
         try:
             t = yf.Ticker(trial.upper()+'.NS')
             info = t.info
-            if info.get('regularMarketPrice') or info.get('currentPrice'):
+            if info and (info.get('currentPrice') or info.get('regularMarketPrice')):
                 return trial.upper()
         except:
             pass
@@ -239,8 +234,8 @@ def resolve_symbol(query):
             try:
                 t = yf.Ticker(sym+'.NS')
                 info = t.info
-                n = (info.get('longName') or '').lower()
-                if n and (ql in n):
+                n = (info or {}).get('longName', '') or ''
+                if n.lower() and ql in n.lower():
                     return sym
             except:
                 pass
@@ -251,12 +246,13 @@ def analyze_stock(symbol):
     t = yf.Ticker(symbol+'.NS')
     info = t.info
     if info is None:
-        raise Exception("Yahoo Finance se data nahi mila. Try again.")
+        raise Exception("Data unavailable")
     
     price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose', 0)
     name = info.get('longName', symbol)
     sector = (info.get('sector') or '')[:25]
     industry = (info.get('industry') or '')[:30]
+    change_pct = info.get('regularMarketChangePercent', 0) or 0
     
     pe = info.get('trailingPE') or 0
     fwd_pe = info.get('forwardPE') or 0
@@ -270,15 +266,15 @@ def analyze_stock(symbol):
     mcap = info.get('marketCap') or 0
     pb = info.get('priceToBook') or 0
     op_margin = info.get('operatingMargins') or 0
-    change_pct = info.get('regularMarketChangePercent', 0) or 0
+    high52 = info.get('fiftyTwoWeekHigh', 0) or 0
+    low52 = info.get('fiftyTwoWeekLow', 0) or 0
     
     hist = t.history(period='3mo')
     c = hist['Close'].dropna().values
     
-    # Technicals
     mom_1w = ((c[-1]/c[-6])-1)*100 if len(c)>=6 else 0
     mom_1m = ((c[-1]/c[-21])-1)*100 if len(c)>=21 else 0
-    volatility = hist['Close'].dropna().pct_change().std() * (252**0.5) * 100
+    volatility = hist['Close'].pct_change().std() * (252**0.5) * 100
     
     ma20 = np.mean(c[-20:]) if len(c)>=20 else price
     ma50 = np.mean(c[-50:]) if len(c)>=50 else price
@@ -292,11 +288,6 @@ def analyze_stock(symbol):
     avg_loss = np.mean(loss[-14:]) if len(loss)>=14 else 0
     rs = avg_gain/avg_loss if avg_loss else 100
     rsi = 100-(100/(1+rs))
-    
-    recent_high = np.max(c[-30:]) if len(c)>=30 else price*1.1
-    recent_low = np.min(c[-30:]) if len(c)>=30 else price*0.9
-    pct_from_high = ((price/recent_high)-1)*100
-    pct_from_low = ((price/recent_low)-1)*100
     
     vl = hist['Volume'].dropna().values
     vol_ratio = (np.mean(vl[-5:])/np.mean(vl[-20:])) if len(vl)>=20 else 1
@@ -374,8 +365,8 @@ def analyze_stock(symbol):
         'mom_1w': f'{mom_1w:.1f}', 'mom_1m': f'{mom_1m:.1f}',
         'pct_ma20': f'{pct_ma20:.1f}', 'pct_ma50': f'{pct_ma50:.1f}',
         'volatility': f'{volatility:.0f}',
-        'high52': info.get('fiftyTwoWeekHigh', 0),
-        'low52': info.get('fiftyTwoWeekLow', 0),
+        'high52': high52,
+        'low52': low52,
     })
     
     ai_insight = ''
@@ -392,11 +383,8 @@ def analyze_stock(symbol):
     try:
         raw_news = t.news or []
         for item in raw_news[:5]:
-            title = item.get('title', '')
-            link = item.get('link', '')
-            publisher = item.get('publisher', '')
-            if title:
-                news_list.append({'title': title, 'link': link, 'source': publisher})
+            news_list.append({'title': item.get('title', ''), 'link': item.get('link', ''),
+                              'source': item.get('publisher', '')})
     except:
         pass
     
@@ -408,7 +396,7 @@ def analyze_stock(symbol):
         'sector': sector, 'industry': industry,
         'ai_enabled': AI_ENABLED,
         'ai_insight': ai_insight,
-        'changePercent': info.get('regularMarketChangePercent', 0) or 0,
+        'changePercent': change_pct,
         'verdict': {'type': verdict_type, 'title': verdict_title, 'text': verdict_text},
         'metrics': [
             {'label': 'Score', 'value': f'{score}/100', 'status': 'good' if score>=50 else ('neutral' if score>=25 else 'bad')},
@@ -431,8 +419,8 @@ def analyze_stock(symbol):
             {'label': 'MA20 Distance', 'value': f'{pct_ma20:+.1f}%'},
             {'label': 'MA50 Distance', 'value': f'{pct_ma50:+.1f}%'},
             {'label': 'Volume Ratio', 'value': f'{vol_ratio:.1f}x'},
-            {'label': '52W High', 'value': f'₹{info.get("fiftyTwoWeekHigh",0):.2f}'},
-            {'label': '52W Low', 'value': f'₹{info.get("fiftyTwoWeekLow",0):.2f}'},
+            {'label': '52W High', 'value': f'₹{high52:.2f}'},
+            {'label': '52W Low', 'value': f'₹{low52:.2f}'},
         ],
         'reasons_pos': reasons_pos,
         'reasons_neg': reasons_neg,
